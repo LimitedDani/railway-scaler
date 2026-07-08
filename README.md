@@ -132,16 +132,21 @@ deployed service.
 
 ### 5. Watch the logs
 
-Each cycle logs one line per region of each target service with its current
-CPU%, Memory%, replica count, and the decision made (and why), plus a line
-whenever a patch is actually applied. With the default `DRY_RUN=true` ->
-`pretty` logging, that looks like:
+Every cycle is logged as a single message: one aligned line per region of
+each target service with its current CPU%, Memory%, replica count, and the
+decision made (and why), plus the outcome (applied, or what a dry run would
+have applied) at the bottom of the same block. With the default
+`DRY_RUN=true` -> `pretty` logging, that looks like:
 
 ```
-[2026-07-08T18:28:25.756Z] web [us-west2]  cpu=82.3% mem=40.1% replicas=1  =>  up to 2 replicas  (cpu or memory usage above high threshold)
-[2026-07-08T18:28:25.756Z] web [eu-west4]  skipped - cooling down (45s left)
-[2026-07-08T18:28:25.756Z] [DRY RUN] Would apply:
+[2026-07-08T18:28:25.756Z]
+----------------------------------------------------------------------------------------------------
+  web       [us-west2]  cpu=82.3% mem=40.1% replicas=1  =>  up to 2 replicas  (cpu or memory usage above high threshold)
+  web       [eu-west4]  skipped - cooling down (45s left)
+  worker    [us-west2]  cpu=4.1% mem=12.0% replicas=1  =>  no change
+  [DRY RUN] Would apply:
   - web [us-west2] 1 -> 2
+----------------------------------------------------------------------------------------------------
 ```
 
 Start with `DRY_RUN=true`, watch a few cycles, tune your thresholds, then

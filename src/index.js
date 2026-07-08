@@ -18,7 +18,7 @@ try {
   process.exit(1);
 }
 
-const log = createLogger(config.logFormat);
+const { log, logCycle } = createLogger(config.logFormat);
 
 // "<serviceId>::<region>" -> timestamp (ms) of the last scaling event for
 // that specific region, kept in memory for the lifetime of this process.
@@ -60,6 +60,7 @@ async function runCycle() {
 
   const patchServices = {};
   const changes = [];
+  const cycleEvents = [];
   const metricWindowSeconds = Math.max(config.pollIntervalMs / 1000, MIN_METRIC_WINDOW_SECONDS);
 
   for (const target of config.targets) {
@@ -69,17 +70,20 @@ async function runCycle() {
     try {
       serviceInstance = await getServiceInstance(config.token, config.environmentId, serviceId);
     } catch (err) {
-      log("service_error", { serviceId, label, stage: "getServiceInstance", error: err.message });
+      cycleEvents.push({ event: "service_error", fields: { serviceId, label, stage: "getServiceInstance", error: err.message } });
       continue;
     }
 
     const regionReplicas = resolveRegionReplicas(envConfig, serviceInstance, serviceId);
     if (regionReplicas.length === 0) {
-      log("service_error", {
-        serviceId,
-        label,
-        stage: "resolveRegionReplicas",
-        error: "service has no region/replica config yet - set an initial region and replica count once in the Railway dashboard before autoscaling it",
+      cycleEvents.push({
+        event: "service_error",
+        fields: {
+          serviceId,
+          label,
+          stage: "resolveRegionReplicas",
+          error: "service has no region/replica config yet - set an initial region and replica count once in the Railway dashboard before autoscaling it",
+        },
       });
       continue;
     }
@@ -101,20 +105,23 @@ async function runCycle() {
         utilizationByRegion = await getUtilizationByRegion(config.token, config.environmentId, serviceId, metricWindowSeconds);
         const unmatched = regionReplicas.filter((r) => !utilizationByRegion.has(r.region));
         if (unmatched.length > 0) {
-          log("service_error", {
-            serviceId,
-            label,
-            stage: "getUtilizationByRegion",
-            error:
-              `configured region(s) [${unmatched.map((r) => r.region).join(", ")}] not found in metrics tags ` +
-              `(metrics reported: [${[...utilizationByRegion.keys()].join(", ") || "none"}]). Railway's metrics ` +
-              "region tag can differ from the multiRegionConfig region key - double check the exact region code " +
-              "and update SCALE_TARGETS if needed.",
+          cycleEvents.push({
+            event: "service_error",
+            fields: {
+              serviceId,
+              label,
+              stage: "getUtilizationByRegion",
+              error:
+                `configured region(s) [${unmatched.map((r) => r.region).join(", ")}] not found in metrics tags ` +
+                `(metrics reported: [${[...utilizationByRegion.keys()].join(", ") || "none"}]). Railway's metrics ` +
+                "region tag can differ from the multiRegionConfig region key - double check the exact region code " +
+                "and update SCALE_TARGETS if needed.",
+            },
           });
         }
       }
     } catch (err) {
-      log("service_error", { serviceId, label, stage: "getUtilization", error: err.message });
+      cycleEvents.push({ event: "service_error", fields: { serviceId, label, stage: "getUtilization", error: err.message } });
       continue;
     }
 
@@ -126,11 +133,14 @@ async function runCycle() {
     for (const { region, replicas: currentReplicas } of regionReplicas) {
       const regionConfig = target.regions[region];
       if (!regionConfig) {
-        log("skip_unconfigured_region", {
-          serviceId,
-          label,
-          region,
-          reason: "region is live on Railway but has no entry in SCALE_TARGETS.regions - not touching it",
+        cycleEvents.push({
+          event: "skip_unconfigured_region",
+          fields: {
+            serviceId,
+            label,
+            region,
+            reason: "region is live on Railway but has no entry in SCALE_TARGETS.regions - not touching it",
+          },
         });
         continue;
       }
@@ -139,7 +149,7 @@ async function runCycle() {
 
       if (inCooldown(key)) {
         const remainingSeconds = Math.ceil((config.cooldownMs - (Date.now() - lastScaledAt.get(key))) / 1000);
-        log("skip_cooldown", { serviceId, label, region, remainingSeconds });
+        cycleEvents.push({ event: "skip_cooldown", fields: { serviceId, label, region, remainingSeconds } });
         continue;
       }
 
@@ -152,16 +162,19 @@ async function runCycle() {
         target: regionConfig,
       });
 
-      log("decision", {
-        serviceId,
-        label,
-        region,
-        currentReplicas,
-        cpuPct: round(utilization.cpuPct),
-        memPct: round(utilization.memPct),
-        action: decision.action,
-        desiredReplicas: decision.desiredReplicas,
-        reason: decision.reason,
+      cycleEvents.push({
+        event: "decision",
+        fields: {
+          serviceId,
+          label,
+          region,
+          currentReplicas,
+          cpuPct: round(utilization.cpuPct),
+          memPct: round(utilization.memPct),
+          action: decision.action,
+          desiredReplicas: decision.desiredReplicas,
+          reason: decision.reason,
+        },
       });
 
       if (decision.action === "none") continue;
@@ -175,10 +188,14 @@ async function runCycle() {
     }
   }
 
-  if (changes.length === 0) return;
+  if (changes.length === 0) {
+    logCycle(cycleEvents);
+    return;
+  }
 
   if (config.dryRun) {
-    log("dry_run_skip_apply", { changes });
+    cycleEvents.push({ event: "dry_run_skip_apply", fields: { changes } });
+    logCycle(cycleEvents);
     return;
   }
 
@@ -187,10 +204,11 @@ async function runCycle() {
     await applyPatch(config.token, config.environmentId, { services: patchServices }, commitMessage);
     const now = Date.now();
     for (const change of changes) lastScaledAt.set(cooldownKey(change.serviceId, change.region), now);
-    log("applied", { changes });
+    cycleEvents.push({ event: "applied", fields: { changes } });
   } catch (err) {
-    log("cycle_error", { stage: "applyPatch", error: err.message, attempted: changes });
+    cycleEvents.push({ event: "cycle_error", fields: { stage: "applyPatch", error: err.message, attempted: changes } });
   }
+  logCycle(cycleEvents);
 }
 
 function sleep(ms) {
