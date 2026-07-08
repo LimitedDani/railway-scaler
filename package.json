@@ -1,0 +1,14 @@
+{
+  "name": "railway-replica-autoscaler",
+  "version": "1.0.0",
+  "description": "Node.js service that polls CPU/Memory usage of allowlisted Railway services and scales replica counts up or down (floor of 1) via the Railway GraphQL API.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
