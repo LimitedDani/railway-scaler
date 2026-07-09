@@ -23,7 +23,7 @@ For each **region** of each target service, every cycle:
 
 If a service is deployed to multiple Railway regions, each region is read
 and scaled completely independently, based on that region's own usage - a
-busy `eu-west` and an idle `us-west2` for the same service can scale in
+busy `europe-west4` and an idle `us-west2` for the same service can scale in
 opposite directions in the same cycle. Thresholds and replica limits
 (`minReplicas`, `maxReplicas`, `cpuHigh`, etc.) apply per region, not to the
 service's combined total across all regions.
@@ -56,12 +56,44 @@ own service ID.
 `multiRegionConfig` (e.g. `europe-west4-drams3a`) doesn't always match the
 `region` tag the metrics API reports for that same service's usage (e.g.
 `europe-west4-drams11a` - the actual physical rack a replica landed on, not
-the logical region you configured). For a single-region service this is a
-non-issue - the autoscaler just reads the whole service's usage without
-trying to match region names. If a service has 2+ regions and one of them
-can't be matched to a metrics tag, you'll see a `getUtilizationByRegion`
-error in the logs naming the mismatch and listing the region(s) the metrics
-API actually reported, so you can fix the region code in `SCALE_TARGETS`.
+the logical region you configured). `SCALE_TARGETS` sidesteps this entirely
+by only ever asking for a *base* region name (see below) - the autoscaler
+resolves the real, currently-live suffixed key itself from the environment
+config, and matches metrics tags to it by that same base prefix rather than
+requiring an exact string match. See [src/regions.js](src/regions.js).
+
+## Railway regions
+
+`SCALE_TARGETS` only needs one of Railway's four base region names as the
+key under `regions` - not the exact suffixed identifier Railway shows you in
+the dashboard or stores in `multiRegionConfig`:
+
+| Region | Location | Base region name to use in `SCALE_TARGETS` |
+| --- | --- | --- |
+| US West | California, USA | `us-west2` |
+| US East | Virginia, USA | `us-east4` |
+| Europe West | Amsterdam, Netherlands | `europe-west4` |
+| Southeast Asia | Singapore | `asia-southeast1` |
+
+Railway's actual config-time identifiers add a datacenter suffix to three of
+these (e.g. `europe-west4-drams3a`), and the metrics API can report yet a
+*different* suffix for the same physical region (e.g.
+`europe-west4-drams11a` for that same service). You can still type the full
+suffixed form in `SCALE_TARGETS` if you want - it gets normalized down to
+its base automatically - but there's no need to, since the base name alone
+is all the autoscaler needs: it reads the real live region key from the
+environment config every cycle, and matches metrics tags to it by base
+prefix (see [src/regions.js](src/regions.js)). Two entries that normalize to
+the same base region (e.g. `europe-west4` and `europe-west4-drams3a` in the
+same service) are rejected at startup as a duplicate, since only one can
+ever be live at a time.
+
+Railway may add more regions over time - check
+[Railway's regions docs](https://docs.railway.com/deployments/regions) for
+the current list. An unrecognized region name is passed through unchanged
+rather than rejected, so a new Railway region still works, it just won't
+automatically reconcile a differently-suffixed metrics tag until it's added
+to `KNOWN_REGIONS` in [src/regions.js](src/regions.js).
 
 ## Setup
 
@@ -99,11 +131,15 @@ full list with defaults):
     {
       "serviceId": "def-456",
       "regions": {
-        "eu-west4-drams3a": { "minReplicas": 2, "maxReplicas": 8, "cpuHigh": 80 }
+        "europe-west4": { "minReplicas": 2, "maxReplicas": 8, "cpuHigh": 80 }
       }
     }
   ]
   ```
+
+  Region keys are base region names (`us-west2`, `us-east4`, `europe-west4`,
+  `asia-southeast1` - see [Railway regions](#railway-regions) below), not the
+  exact suffixed identifier Railway shows you.
 
   `serviceId` and `regions` are required; `regions.<region>.minReplicas` is
   required for every region you list (there's no default - it's your safety
@@ -142,7 +178,7 @@ have applied) at the bottom of the same block. With the default
 [2026-07-08T18:28:25.756Z]
 ----------------------------------------------------------------------------------------------------
   web       [us-west2]  cpu=82.3% mem=40.1% replicas=1  =>  up to 2 replicas  (cpu or memory usage above high threshold)
-  web       [eu-west4]  skipped - cooling down (45s left)
+  web       [europe-west4-drams3a]  skipped - cooling down (45s left)
   worker    [us-west2]  cpu=4.1% mem=12.0% replicas=1  =>  no change
   [DRY RUN] Would apply:
   - web [us-west2] 1 -> 2
@@ -169,6 +205,9 @@ export the variables manually.)
 
 - [src/config.js](src/config.js) - env var parsing/validation, `SCALE_TARGETS`
   parsing, defaults merge, self-service guard.
+- [src/regions.js](src/regions.js) - Railway's known base region names and
+  the `baseRegionOf` normalizer used to reconcile config vs. metrics region
+  suffix mismatches.
 - [src/railwayApi.js](src/railwayApi.js) - GraphQL client and the operations
   used: reading environment config, reading legacy service instance fields,
   reading per-region metrics, and applying a patch.

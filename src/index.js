@@ -9,6 +9,7 @@ import {
 } from "./railwayApi.js";
 import { decide } from "./decide.js";
 import { createLogger } from "./logger.js";
+import { baseRegionOf } from "./regions.js";
 
 let config;
 try {
@@ -37,6 +38,17 @@ function round(value) {
 
 function cooldownKey(serviceId, region) {
   return `${serviceId}::${region}`;
+}
+
+// Matches by base region rather than an exact string, since the metrics
+// API's region tag can use a different suffix than the live region key
+// (e.g. "europe-west4-drams11a" reported for "europe-west4-drams3a") - see
+// src/regions.js.
+function findUtilizationForBaseRegion(utilizationByRegion, baseRegion) {
+  for (const [tag, utilization] of utilizationByRegion.entries()) {
+    if (baseRegionOf(tag) === baseRegion) return utilization;
+  }
+  return { cpuPct: null, memPct: null };
 }
 
 function inCooldown(key) {
@@ -103,7 +115,8 @@ async function runCycle() {
         utilizationByRegion = new Map([[regionReplicas[0].region, utilization]]);
       } else {
         utilizationByRegion = await getUtilizationByRegion(config.token, config.environmentId, serviceId, metricWindowSeconds);
-        const unmatched = regionReplicas.filter((r) => !utilizationByRegion.has(r.region));
+        const metricsBases = new Set([...utilizationByRegion.keys()].map(baseRegionOf));
+        const unmatched = regionReplicas.filter((r) => !metricsBases.has(baseRegionOf(r.region)));
         if (unmatched.length > 0) {
           cycleEvents.push({
             event: "service_error",
@@ -112,10 +125,10 @@ async function runCycle() {
               label,
               stage: "getUtilizationByRegion",
               error:
-                `configured region(s) [${unmatched.map((r) => r.region).join(", ")}] not found in metrics tags ` +
-                `(metrics reported: [${[...utilizationByRegion.keys()].join(", ") || "none"}]). Railway's metrics ` +
-                "region tag can differ from the multiRegionConfig region key - double check the exact region code " +
-                "and update SCALE_TARGETS if needed.",
+                `configured region(s) [${unmatched.map((r) => r.region).join(", ")}] have no matching base region ` +
+                `in metrics tags (metrics reported: [${[...utilizationByRegion.keys()].join(", ") || "none"}]). ` +
+                "This region may not have received traffic yet, or it's a Railway region src/regions.js doesn't " +
+                "know about yet.",
             },
           });
         }
@@ -131,7 +144,8 @@ async function runCycle() {
     const regionPatch = {};
 
     for (const { region, replicas: currentReplicas } of regionReplicas) {
-      const regionConfig = target.regions[region];
+      const baseRegion = baseRegionOf(region);
+      const regionConfig = target.regions[baseRegion];
       if (!regionConfig) {
         cycleEvents.push({
           event: "skip_unconfigured_region",
@@ -153,7 +167,7 @@ async function runCycle() {
         continue;
       }
 
-      const utilization = utilizationByRegion.get(region) ?? { cpuPct: null, memPct: null };
+      const utilization = findUtilizationForBaseRegion(utilizationByRegion, baseRegion);
 
       const decision = decide({
         cpuPct: utilization.cpuPct,

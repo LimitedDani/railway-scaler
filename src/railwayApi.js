@@ -157,11 +157,14 @@ export async function getServiceUtilization(token, environmentId, serviceId, win
  * and Memory% utilization. Only meaningful for services with 2+ regions -
  * see the caveat on `getServiceUtilization` about region key mismatches
  * between `multiRegionConfig` and the metrics API's `region` tag. Callers
- * should treat a configured region missing from the returned map as "region
- * name mismatch, not missing data" and surface it loudly rather than
- * silently treating it as zero usage.
+ * should match returned keys against a configured region by base region
+ * (see `baseRegionOf` in src/regions.js), not exact string equality, and
+ * treat a configured region whose base has no match at all as "region name
+ * mismatch, not missing data" - surface it loudly rather than silently
+ * treating it as zero usage.
  *
- * Returns a Map<region, { cpuPct, memPct, raw }>.
+ * Returns a Map<region, { cpuPct, memPct, raw }> keyed by the raw region tag
+ * exactly as reported by the metrics API (not normalized).
  */
 export async function getUtilizationByRegion(token, environmentId, serviceId, windowSeconds) {
   const startDate = new Date(Date.now() - windowSeconds * 1000).toISOString();

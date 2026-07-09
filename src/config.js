@@ -1,3 +1,5 @@
+import { baseRegionOf, KNOWN_REGIONS } from "./regions.js";
+
 function requireEnv(name) {
   const value = process.env[name];
   if (!value || value.trim() === "") {
@@ -101,14 +103,27 @@ function buildTargets(rawTargets, defaults, selfServiceId) {
     const serviceMemLow = entry.memLow ?? defaults.memLow;
 
     const regions = {};
-    for (const [region, regionConfig] of Object.entries(entry.regions)) {
+    for (const [rawRegion, regionConfig] of Object.entries(entry.regions)) {
+      // Normalize to the base region name (e.g. "europe-west4-drams3a" and
+      // "europe-west4" both become "europe-west4") so this always matches
+      // the real live region key and metrics tags at runtime, regardless of
+      // which exact suffix was typed here - see src/regions.js.
+      const region = baseRegionOf(rawRegion);
       const minReplicas = regionConfig.minReplicas;
       const maxReplicas = regionConfig.maxReplicas ?? serviceMaxReplicas;
 
       if (maxReplicas < minReplicas) {
         throw new Error(
-          `SCALE_TARGETS entry ${entry.serviceId} region "${region}" has maxReplicas (${maxReplicas}) ` +
+          `SCALE_TARGETS entry ${entry.serviceId} region "${rawRegion}" has maxReplicas (${maxReplicas}) ` +
             `below its required minReplicas (${minReplicas})`
+        );
+      }
+
+      if (regions[region]) {
+        throw new Error(
+          `SCALE_TARGETS entry ${entry.serviceId} lists region "${rawRegion}", which normalizes to base region ` +
+            `"${region}" - but that base region is already configured under a different suffix. List each ` +
+            `region once, using its base name (one of: ${KNOWN_REGIONS.join(", ")}).`
         );
       }
 
