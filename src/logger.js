@@ -73,7 +73,22 @@ function alignColumns(entries) {
 }
 
 /**
- * Returns `{ log, logCycle }`.
+ * Short id string identifying this process, e.g. "d3f1a9b2/7c1e4f80" for
+ * "deploy/replica", so if two processes are ever logging at once (a
+ * rolling deploy briefly runs the old and new container together) their
+ * lines are visibly distinguishable instead of silently interleaving into
+ * what looks like one cycle with services missing from it.
+ */
+function instanceTag({ deploymentId, replicaId } = {}) {
+  if (!deploymentId && !replicaId) return "";
+  const short = (id) => (id ? id.slice(0, 8) : "?");
+  return ` [${short(deploymentId)}/${short(replicaId)}]`;
+}
+
+/**
+ * Returns `{ log, logCycle }`. `instance` is `{ deploymentId, replicaId }`
+ * (both optional) - Railway's `RAILWAY_DEPLOYMENT_ID` / `RAILWAY_REPLICA_ID`,
+ * tagged onto every line for correlation (see `instanceTag` above).
  *
  * `log(event, fields)` emits a single line immediately - for process-level
  * events like startup, or a cycle that aborted before evaluating anything.
@@ -85,10 +100,12 @@ function alignColumns(entries) {
  * (log aggregators keep working unchanged); in "pretty" format it's
  * rendered as a single bordered block with columns aligned.
  */
-export function createLogger(format) {
+export function createLogger(format, instance = {}) {
+  const tag = instanceTag(instance);
+
   if (format === "pretty") {
     const log = (event, fields = {}) => {
-      console.log(`[${new Date().toISOString()}] ${renderLine(event, fields)}`);
+      console.log(`[${new Date().toISOString()}]${tag} ${renderLine(event, fields)}`);
     };
 
     const logCycle = (entries) => {
@@ -98,14 +115,22 @@ export function createLogger(format) {
       const width = Math.min(100, Math.max(40, ...lines.map((l) => l.length)));
       const border = "-".repeat(width);
 
-      console.log(`[${new Date().toISOString()}]\n${border}\n${lines.join("\n")}\n${border}`);
+      console.log(`[${new Date().toISOString()}]${tag}\n${border}\n${lines.join("\n")}\n${border}`);
     };
 
     return { log, logCycle };
   }
 
   const log = (event, fields = {}) => {
-    console.log(JSON.stringify({ ts: new Date().toISOString(), event, ...fields }));
+    console.log(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        event,
+        ...(instance.deploymentId ? { deploymentId: instance.deploymentId } : {}),
+        ...(instance.replicaId ? { replicaId: instance.replicaId } : {}),
+        ...fields,
+      })
+    );
   };
 
   return { log, logCycle: (entries) => entries.forEach(({ event, fields }) => log(event, fields)) };

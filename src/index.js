@@ -19,7 +19,10 @@ try {
   process.exit(1);
 }
 
-const { log, logCycle } = createLogger(config.logFormat);
+const { log, logCycle } = createLogger(config.logFormat, {
+  deploymentId: config.deploymentId,
+  replicaId: config.replicaId,
+});
 
 // "<serviceId>::<region>" -> timestamp (ms) of the last scaling event for
 // that specific region, kept in memory for the lifetime of this process.
@@ -233,6 +236,8 @@ async function main() {
   log("startup", {
     projectId: config.projectId,
     environmentId: config.environmentId,
+    deploymentId: config.deploymentId,
+    replicaId: config.replicaId,
     targets: config.targets.map((t) => ({ serviceId: t.serviceId, label: t.label, regions: Object.keys(t.regions) })),
     pollIntervalSeconds: config.pollIntervalMs / 1000,
     cooldownSeconds: config.cooldownMs / 1000,

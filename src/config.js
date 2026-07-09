@@ -172,11 +172,22 @@ export function loadConfig() {
   const cooldownSeconds = envInt("COOLDOWN_SECONDS", 180);
   const dryRun = envBool("DRY_RUN", false);
 
+  // Not required, but tagged onto every log line - Railway does rolling
+  // deploys, so the previous deployment's container can briefly keep
+  // running (and logging) after a new one has started. Two processes
+  // writing their own cycles to the same log stream at once can otherwise
+  // look like one cycle is missing services, when really it's two
+  // interleaved cycles from two different processes.
+  const deploymentId = process.env.RAILWAY_DEPLOYMENT_ID?.trim() || null;
+  const replicaId = process.env.RAILWAY_REPLICA_ID?.trim() || null;
+
   return {
     token,
     projectId,
     environmentId,
     selfServiceId,
+    deploymentId,
+    replicaId,
     dryRun,
     logFormat: resolveLogFormat(dryRun),
     pollIntervalMs: pollIntervalSeconds * 1000,

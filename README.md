@@ -175,7 +175,7 @@ have applied) at the bottom of the same block. With the default
 `DRY_RUN=true` -> `pretty` logging, that looks like:
 
 ```
-[2026-07-08T18:28:25.756Z]
+[2026-07-08T18:28:25.756Z] [3f1a9b21/7c1e4f80]
 ----------------------------------------------------------------------------------------------------
   web       [us-west2]  cpu=82.3% mem=40.1% replicas=1  =>  up to 2 replicas  (cpu or memory usage above high threshold)
   web       [europe-west4-drams3a]  skipped - cooling down (45s left)
@@ -184,6 +184,16 @@ have applied) at the bottom of the same block. With the default
   - web [us-west2] 1 -> 2
 ----------------------------------------------------------------------------------------------------
 ```
+
+Every line is tagged with `[deploymentId/replicaId]` (Railway's own
+`RAILWAY_DEPLOYMENT_ID`/`RAILWAY_REPLICA_ID`, shortened). This matters
+because Railway does rolling deploys: the previous deployment's container
+can keep running - and logging - for a bit after a new one has started. Two
+processes each printing their own complete cycle block to the same log
+stream at the same time can otherwise look like one cycle with services
+randomly missing from it, when it's really two interleaved cycles from two
+different processes. If you ever see that, check whether the tag changes
+mid-block instead of assuming a bug.
 
 Start with `DRY_RUN=true`, watch a few cycles, tune your thresholds, then
 flip it to `false` (which also switches logging to structured `json` unless
