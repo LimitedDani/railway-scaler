@@ -28,7 +28,10 @@ const PRETTY_FORMATTERS = {
 
   decision: (f) => {
     const outcome = f.action === "none" ? "no change" : `${f.action} to ${f.desiredReplicas} replicas  (${f.reason})`;
-    return `${f.label} [${f.region}]  cpu=${fmtPct(f.cpuPct)} mem=${fmtPct(f.memPct)} replicas=${f.currentReplicas}  =>  ${outcome}`;
+    const cpu = f.cpuStr ?? fmtPct(f.cpuPct);
+    const mem = f.memStr ?? fmtPct(f.memPct);
+    const replicas = f.replicasStr ?? String(f.currentReplicas);
+    return `${f.label} [${f.region}]  cpu=${cpu} mem=${mem} replicas=${replicas}  =>  ${outcome}`;
   },
 
   dry_run_skip_apply: (f) => `[DRY RUN] Would apply:\n${fmtChanges(f.changes)}`,
@@ -41,10 +44,32 @@ function renderLine(event, fields) {
   return formatter ? formatter(fields) : `${event} ${JSON.stringify(fields)}`;
 }
 
-/** Right-pads `fields.label` to `width` for column alignment, without mutating the original. */
-function withPaddedLabel(fields, width) {
-  if (fields.label == null || !width) return fields;
-  return { ...fields, label: fields.label.padEnd(width) };
+/**
+ * Right-pads every alignable column of a cycle's entries to a shared width,
+ * so rows stay in neat columns even when e.g. one row's cpu% grows an extra
+ * digit ("0%" vs "82.3%") - without this, only `label` lined up and
+ * everything after it (mem, replicas, the outcome) would drift per row.
+ */
+function alignColumns(entries) {
+  const labelWidth = Math.max(0, ...entries.map((e) => (e.fields.label ?? "").length));
+  const regionWidth = Math.max(0, ...entries.map((e) => (e.fields.region ?? "").length));
+
+  const decisions = entries.filter((e) => e.event === "decision");
+  const cpuWidth = Math.max(0, ...decisions.map((e) => fmtPct(e.fields.cpuPct).length));
+  const memWidth = Math.max(0, ...decisions.map((e) => fmtPct(e.fields.memPct).length));
+  const replicasWidth = Math.max(0, ...decisions.map((e) => String(e.fields.currentReplicas).length));
+
+  return entries.map((e) => {
+    const f = { ...e.fields };
+    if (f.label != null) f.label = f.label.padEnd(labelWidth);
+    if (f.region != null) f.region = f.region.padEnd(regionWidth);
+    if (e.event === "decision") {
+      f.cpuStr = fmtPct(f.cpuPct).padEnd(cpuWidth);
+      f.memStr = fmtPct(f.memPct).padEnd(memWidth);
+      f.replicasStr = String(f.currentReplicas).padEnd(replicasWidth);
+    }
+    return { event: e.event, fields: f };
+  });
 }
 
 /**
@@ -58,7 +83,7 @@ function withPaddedLabel(fields, width) {
  * so a whole cycle reads as one message instead of a scattered wall of
  * lines. In "json" format this still emits one structured line per entry
  * (log aggregators keep working unchanged); in "pretty" format it's
- * rendered as a single bordered block with label columns aligned.
+ * rendered as a single bordered block with columns aligned.
  */
 export function createLogger(format) {
   if (format === "pretty") {
@@ -69,8 +94,7 @@ export function createLogger(format) {
     const logCycle = (entries) => {
       if (entries.length === 0) return;
 
-      const labelWidth = Math.max(0, ...entries.map((e) => (e.fields.label ?? "").length));
-      const lines = entries.map((e) => `  ${renderLine(e.event, withPaddedLabel(e.fields, labelWidth))}`);
+      const lines = alignColumns(entries).map((e) => `  ${renderLine(e.event, e.fields)}`);
       const width = Math.min(100, Math.max(40, ...lines.map((l) => l.length)));
       const border = "-".repeat(width);
 
