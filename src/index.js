@@ -10,6 +10,8 @@ import {
 import { decide } from "./decide.js";
 import { createLogger } from "./logger.js";
 import { baseRegionOf } from "./regions.js";
+import { createState, recordCycle, recordScaling, getActiveOverride } from "./state.js";
+import { startWebPanel } from "./webPanel.js";
 
 let config;
 try {
@@ -31,6 +33,10 @@ const { log, logCycle } = createLogger(config.logFormat, {
 // of the same service that also needs to scale.
 const lastScaledAt = new Map();
 
+// Runtime state shared with the (optional) web panel: latest metrics and
+// decisions per region, plus any active manual overrides.
+const state = createState();
+
 // Minimum lookback window for metrics, regardless of poll interval, so a
 // very short POLL_INTERVAL_SECONDS still gets a meaningful sample.
 const MIN_METRIC_WINDOW_SECONDS = 30;
@@ -51,12 +57,19 @@ function findUtilizationForBaseRegion(utilizationByRegion, baseRegion) {
   for (const [tag, utilization] of utilizationByRegion.entries()) {
     if (baseRegionOf(tag) === baseRegion) return utilization;
   }
-  return { cpuPct: null, memPct: null };
+  return { cpuPct: null, memPct: null, replicas: [] };
 }
 
 function inCooldown(key) {
   const last = lastScaledAt.get(key);
   return last !== undefined && Date.now() - last < config.cooldownMs;
+}
+
+// Every completed cycle is both logged and snapshotted into the shared
+// state, so the web panel always reflects the most recent decisions.
+function finishCycle(cycleEvents) {
+  recordCycle(state, cycleEvents);
+  logCycle(cycleEvents);
 }
 
 async function runCycle() {
@@ -164,7 +177,17 @@ async function runCycle() {
 
       const key = cooldownKey(serviceId, region);
 
-      if (inCooldown(key)) {
+      // A manual override from the web panel temporarily raises the replica
+      // floor for this region (never above maxReplicas). The autoscaler can
+      // still scale further up on load - an override only lifts the minimum.
+      const override = getActiveOverride(state, serviceId, baseRegion);
+      const effectiveMin = override
+        ? Math.min(Math.max(regionConfig.minReplicas, override.minReplicas), regionConfig.maxReplicas)
+        : regionConfig.minReplicas;
+
+      // Cooldown never delays honoring the floor - an admin raising the
+      // minimum expects it applied on the next cycle, not after the cooldown.
+      if (inCooldown(key) && currentReplicas >= effectiveMin) {
         const remainingSeconds = Math.ceil((config.cooldownMs - (Date.now() - lastScaledAt.get(key))) / 1000);
         cycleEvents.push({ event: "skip_cooldown", fields: { serviceId, label, region, remainingSeconds } });
         continue;
@@ -176,7 +199,7 @@ async function runCycle() {
         cpuPct: utilization.cpuPct,
         memPct: utilization.memPct,
         currentReplicas,
-        target: regionConfig,
+        target: override ? { ...regionConfig, minReplicas: effectiveMin } : regionConfig,
       });
 
       cycleEvents.push({
@@ -191,13 +214,36 @@ async function runCycle() {
           action: decision.action,
           desiredReplicas: decision.desiredReplicas,
           reason: decision.reason,
+          // Per-replica breakdown only when there's actually more than one
+          // replica to break down - with a single replica it would just
+          // repeat the aggregate.
+          ...(utilization.replicas?.length > 1
+            ? {
+                replicaMetrics: utilization.replicas.map((r) => ({
+                  instanceId: r.instanceId,
+                  cpuPct: round(r.cpuPct),
+                  memPct: round(r.memPct),
+                })),
+              }
+            : {}),
+          ...(override
+            ? { overrideMin: effectiveMin, overrideExpiresAt: new Date(override.expiresAt).toISOString() }
+            : {}),
         },
       });
 
       if (decision.action === "none") continue;
 
       regionPatch[region] = { numReplicas: decision.desiredReplicas };
-      changes.push({ serviceId, label, region, from: currentReplicas, to: decision.desiredReplicas });
+      changes.push({
+        serviceId,
+        label,
+        region,
+        from: currentReplicas,
+        to: decision.desiredReplicas,
+        action: decision.action,
+        reason: decision.reason,
+      });
     }
 
     if (Object.keys(regionPatch).length > 0) {
@@ -206,13 +252,14 @@ async function runCycle() {
   }
 
   if (changes.length === 0) {
-    logCycle(cycleEvents);
+    finishCycle(cycleEvents);
     return;
   }
 
   if (config.dryRun) {
     cycleEvents.push({ event: "dry_run_skip_apply", fields: { changes } });
-    logCycle(cycleEvents);
+    recordScaling(state, changes, { dryRun: true });
+    finishCycle(cycleEvents);
     return;
   }
 
@@ -221,11 +268,12 @@ async function runCycle() {
     await applyPatch(config.token, config.environmentId, { services: patchServices }, commitMessage);
     const now = Date.now();
     for (const change of changes) lastScaledAt.set(cooldownKey(change.serviceId, change.region), now);
+    recordScaling(state, changes, { dryRun: false });
     cycleEvents.push({ event: "applied", fields: { changes } });
   } catch (err) {
     cycleEvents.push({ event: "cycle_error", fields: { stage: "applyPatch", error: err.message, attempted: changes } });
   }
-  logCycle(cycleEvents);
+  finishCycle(cycleEvents);
 }
 
 function sleep(ms) {
@@ -242,7 +290,12 @@ async function main() {
     pollIntervalSeconds: config.pollIntervalMs / 1000,
     cooldownSeconds: config.cooldownMs / 1000,
     dryRun: config.dryRun,
+    webPanel: config.webPanel.enabled ? { port: config.webPanel.port } : false,
   });
+
+  if (config.webPanel.enabled) {
+    startWebPanel(config, state, log);
+  }
 
   // Cycles run back-to-back (never overlapping): each tick waits for the
   // previous one to finish before the next interval is scheduled.

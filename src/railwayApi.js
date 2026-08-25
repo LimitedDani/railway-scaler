@@ -112,6 +112,45 @@ function emptyAverages() {
   return initial;
 }
 
+// Bucket for metric series the API returned without a deploymentInstanceId
+// tag - see buildUtilization for how it's treated.
+const UNTAGGED = "";
+
+/**
+ * Reduces per-replica metric averages to a single utilization result: the
+ * aggregate percentages (total usage / total limit across all replicas -
+ * the same fleet-wide number an ungrouped query produces, and what the
+ * scaling decision runs on) plus a per-replica breakdown, so one hot
+ * replica next to an idle one doesn't hide inside a bland-looking average.
+ *
+ * Railway sometimes returns extra series without a deploymentInstanceId tag
+ * that duplicate the tagged per-instance data. Whenever at least one tagged
+ * instance exists, untagged series are dropped - otherwise they'd show up
+ * as a phantom extra replica and double-count the aggregate totals. Only
+ * when nothing is tagged at all is the untagged data used (as the
+ * aggregate, with no per-replica breakdown to offer).
+ *
+ * Returns { cpuPct, memPct, raw, replicas: [{ instanceId, cpuPct, memPct }] }
+ * with instanceId shortened for display.
+ */
+function buildUtilization(averagesByInstance) {
+  const tagged = new Map([...averagesByInstance].filter(([instanceId]) => instanceId !== UNTAGGED));
+  const usable = tagged.size > 0 ? tagged : averagesByInstance;
+
+  const totals = emptyAverages();
+  const replicas = [];
+  for (const [instanceId, averages] of usable.entries()) {
+    for (const name of METRIC_NAMES) {
+      if (averages[name] != null) totals[name] = (totals[name] ?? 0) + averages[name];
+    }
+    if (instanceId !== UNTAGGED) {
+      const { cpuPct, memPct } = pctFrom(averages);
+      replicas.push({ instanceId: instanceId.slice(0, 8), cpuPct, memPct });
+    }
+  }
+  return { ...pctFrom(totals), replicas };
+}
+
 /**
  * Fetches usage/limit metrics for a whole service over the given lookback
  * window (not split by region) and reduces the samples to average CPU% and
@@ -132,9 +171,12 @@ export async function getServiceUtilization(token, environmentId, serviceId, win
         serviceId: $serviceId
         startDate: $startDate
         measurements: [CPU_USAGE, CPU_LIMIT, MEMORY_USAGE_GB, MEMORY_LIMIT_GB]
-        groupBy: [SERVICE_ID]
+        groupBy: [SERVICE_ID, DEPLOYMENT_INSTANCE_ID]
       ) {
         measurement
+        tags {
+          deploymentInstanceId
+        }
         values {
           ts
           value
@@ -144,11 +186,15 @@ export async function getServiceUtilization(token, environmentId, serviceId, win
   `;
   const data = await graphqlRequest(token, query, { environmentId, serviceId, startDate });
 
-  const averages = emptyAverages();
+  const averagesByInstance = new Map();
   for (const result of data.metrics ?? []) {
-    averages[result.measurement] = average(result.values);
+    const instanceId = result.tags?.deploymentInstanceId || UNTAGGED;
+    if (!averagesByInstance.has(instanceId)) {
+      averagesByInstance.set(instanceId, emptyAverages());
+    }
+    averagesByInstance.get(instanceId)[result.measurement] = average(result.values);
   }
-  return pctFrom(averages);
+  return buildUtilization(averagesByInstance);
 }
 
 /**
@@ -163,8 +209,9 @@ export async function getServiceUtilization(token, environmentId, serviceId, win
  * mismatch, not missing data" - surface it loudly rather than silently
  * treating it as zero usage.
  *
- * Returns a Map<region, { cpuPct, memPct, raw }> keyed by the raw region tag
- * exactly as reported by the metrics API (not normalized).
+ * Returns a Map<region, { cpuPct, memPct, raw, replicas }> keyed by the raw
+ * region tag exactly as reported by the metrics API (not normalized), where
+ * `replicas` is the per-replica breakdown (see `buildUtilization`).
  */
 export async function getUtilizationByRegion(token, environmentId, serviceId, windowSeconds) {
   const startDate = new Date(Date.now() - windowSeconds * 1000).toISOString();
@@ -175,11 +222,12 @@ export async function getUtilizationByRegion(token, environmentId, serviceId, wi
         serviceId: $serviceId
         startDate: $startDate
         measurements: [CPU_USAGE, CPU_LIMIT, MEMORY_USAGE_GB, MEMORY_LIMIT_GB]
-        groupBy: [SERVICE_ID, REGION]
+        groupBy: [SERVICE_ID, REGION, DEPLOYMENT_INSTANCE_ID]
       ) {
         measurement
         tags {
           region
+          deploymentInstanceId
         }
         values {
           ts
@@ -190,19 +238,25 @@ export async function getUtilizationByRegion(token, environmentId, serviceId, wi
   `;
   const data = await graphqlRequest(token, query, { environmentId, serviceId, startDate });
 
+  // region -> instanceId -> averages
   const averagesByRegion = new Map();
   for (const result of data.metrics ?? []) {
     const region = result.tags?.region;
     if (!region) continue;
+    const instanceId = result.tags?.deploymentInstanceId || UNTAGGED;
     if (!averagesByRegion.has(region)) {
-      averagesByRegion.set(region, emptyAverages());
+      averagesByRegion.set(region, new Map());
     }
-    averagesByRegion.get(region)[result.measurement] = average(result.values);
+    const byInstance = averagesByRegion.get(region);
+    if (!byInstance.has(instanceId)) {
+      byInstance.set(instanceId, emptyAverages());
+    }
+    byInstance.get(instanceId)[result.measurement] = average(result.values);
   }
 
   const utilizationByRegion = new Map();
-  for (const [region, averages] of averagesByRegion.entries()) {
-    utilizationByRegion.set(region, pctFrom(averages));
+  for (const [region, byInstance] of averagesByRegion.entries()) {
+    utilizationByRegion.set(region, buildUtilization(byInstance));
   }
   return utilizationByRegion;
 }

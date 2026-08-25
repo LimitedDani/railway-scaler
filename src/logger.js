@@ -31,8 +31,22 @@ const PRETTY_FORMATTERS = {
     const cpu = f.cpuStr ?? fmtPct(f.cpuPct);
     const mem = f.memStr ?? fmtPct(f.memPct);
     const replicas = f.replicasStr ?? String(f.currentReplicas);
-    return `${f.label} [${f.region}]  cpu=${cpu} mem=${mem} replicas=${replicas}  =>  ${outcome}`;
+    const override = f.overrideMin != null ? `  [override min=${f.overrideMin}]` : "";
+    // cpu/mem above are the aggregate across all replicas; with 2+ replicas
+    // also show each replica's own usage so a skewed fleet is visible.
+    const perReplica = f.replicaMetrics?.length
+      ? `  (per replica: ${f.replicaMetrics.map((r) => `${r.instanceId} ${fmtPct(r.cpuPct)}/${fmtPct(r.memPct)}`).join(", ")})`
+      : "";
+    return `${f.label} [${f.region}]  cpu=${cpu} mem=${mem} replicas=${replicas}  =>  ${outcome}${override}${perReplica}`;
   },
+
+  web_panel_started: (f) => `Web panel listening on port ${f.port}`,
+
+  web_panel_error: (f) => `[ERROR] web panel: ${f.error}`,
+
+  override_set: (f) => `Override set: ${f.label} [${f.region}] min=${f.minReplicas} for ${f.durationHours}h (until ${f.expiresAt})`,
+
+  override_cleared: (f) => `Override cleared: ${f.label} [${f.region}]`,
 
   dry_run_skip_apply: (f) => `[DRY RUN] Would apply:\n${fmtChanges(f.changes)}`,
 

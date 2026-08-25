@@ -168,6 +168,18 @@ export function loadConfig() {
     console.warn("[config] SCALE_TARGETS is empty (or only contained the autoscaler's own service). Nothing will be scaled.");
   }
 
+  // The web panel is opt-in and refuses to start without credentials -
+  // it exposes override controls, so it must never be reachable unauthenticated.
+  const webPanelEnabled = envBool("WEB_PANEL_ENABLED", false);
+  const webPanel = webPanelEnabled
+    ? {
+        enabled: true,
+        port: envInt("WEB_PANEL_PORT", 8080),
+        user: requireEnv("WEB_PANEL_USER"),
+        password: requireEnv("WEB_PANEL_PASSWORD"),
+      }
+    : { enabled: false };
+
   const pollIntervalSeconds = envInt("POLL_INTERVAL_SECONDS", 60);
   const cooldownSeconds = envInt("COOLDOWN_SECONDS", 180);
   const dryRun = envBool("DRY_RUN", false);
@@ -190,6 +202,7 @@ export function loadConfig() {
     replicaId,
     dryRun,
     logFormat: resolveLogFormat(dryRun),
+    webPanel,
     pollIntervalMs: pollIntervalSeconds * 1000,
     cooldownMs: cooldownSeconds * 1000,
     targets,

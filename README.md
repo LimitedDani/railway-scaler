@@ -161,6 +161,12 @@ full list with defaults):
   aggregators) or `pretty` (short human-readable lines, good for watching
   along). Defaults to `pretty` whenever `DRY_RUN=true`, and `json` otherwise -
   set it explicitly to override that default in either mode.
+- `WEB_PANEL_ENABLED` - set to `true` to enable the admin web panel (see
+  [Web panel](#web-panel) below). Default `false`.
+- `WEB_PANEL_PORT` - port the panel listens on (default `8080`).
+- `WEB_PANEL_USER` / `WEB_PANEL_PASSWORD` - HTTP Basic auth credentials for
+  the panel. Both are required when the panel is enabled - it refuses to
+  start without them.
 
 `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, and `RAILWAY_SERVICE_ID` don't
 need to be set manually - Railway injects them automatically into every
@@ -171,7 +177,11 @@ deployed service.
 Every cycle is logged as a single message: one aligned line per region of
 each target service with its current CPU%, Memory%, replica count, and the
 decision made (and why), plus the outcome (applied, or what a dry run would
-have applied) at the bottom of the same block. With the default
+have applied) at the bottom of the same block. CPU% and Memory% are the
+aggregate across a region's replicas (total usage / total limit); when a
+region runs 2+ replicas the line also appends each replica's own cpu/mem
+(`per replica: <id> cpu%/mem%, ...`), since scaling decisions use the
+aggregate but a skewed fleet is worth seeing. With the default
 `DRY_RUN=true` -> `pretty` logging, that looks like:
 
 ```
@@ -199,6 +209,46 @@ Start with `DRY_RUN=true`, watch a few cycles, tune your thresholds, then
 flip it to `false` (which also switches logging to structured `json` unless
 you set `LOG_FORMAT` explicitly).
 
+## Web panel
+
+An optional admin dashboard, enabled with `WEB_PANEL_ENABLED=true` and
+protected by HTTP Basic auth (`WEB_PANEL_USER` / `WEB_PANEL_PASSWORD`, both
+required). It's a plain `node:http` server - no extra dependencies - serving
+a single page that auto-refreshes every 10 seconds and shows, per service
+and region: current replicas, average CPU% and Memory% (with a per-replica
+breakdown underneath when a region runs 2+ replicas, so one overloaded
+replica can't hide inside the average), the configured min/max, the last
+decision made (and why), and any active override. Below
+the overview there's a scaling history: every actual scale up/down event
+(with from/to, the reason, and a dry-run marker where applicable) - cycles
+where nothing changed are not recorded. It's in-memory and capped at the
+most recent 200 events.
+
+From the panel an admin can set a **temporary override**: raise the minimum
+replica floor for one service/region for a chosen number of hours (e.g.
+"min 2 replicas for the next 2 hours"). While active:
+
+- the autoscaler scales the region up to the override minimum on the next
+  poll cycle (cooldown does not delay honoring the floor), and won't scale
+  below it;
+- it can still scale **above** the override on load, up to `maxReplicas`
+  as usual (the override only lifts the minimum, capped at `maxReplicas`);
+- when the override expires (or is cancelled from the panel), the configured
+  `minReplicas` from `SCALE_TARGETS` applies again and the normal scale-down
+  rules take over.
+
+Overrides live in memory only: a restart or redeploy of the autoscaler drops
+them (the `SCALE_TARGETS` floor always remains in effect). Every set/clear/
+expiry is logged and shown in the panel's activity list.
+
+There's also a small JSON API behind the same auth, used by the page itself:
+`GET /api/state`, `POST /api/override` (`{serviceId, region, minReplicas,
+durationHours}`), and `DELETE /api/override` (`{serviceId, region}`).
+
+To expose the panel on Railway, generate a domain for the autoscaler service
+and point it at `WEB_PANEL_PORT`. Basic auth over Railway's HTTPS edge is
+fine for an internal tool, but treat the credentials like any other secret.
+
 ## Local development
 
 ```bash
@@ -223,4 +273,9 @@ export the variables manually.)
   reading per-region metrics, and applying a patch.
 - [src/decide.js](src/decide.js) - pure up/down/none decision function.
 - [src/logger.js](src/logger.js) - `json`/`pretty` log line formatting.
+- [src/state.js](src/state.js) - in-memory runtime state shared between the
+  loop and the web panel: latest per-region decisions, active overrides
+  (with expiry), and an override audit log.
+- [src/webPanel.js](src/webPanel.js) - optional Basic-auth `node:http`
+  dashboard + JSON API for viewing metrics and managing overrides.
 - [src/index.js](src/index.js) - the polling loop that ties it all together.

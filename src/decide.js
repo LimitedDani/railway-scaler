@@ -2,6 +2,8 @@
  * Pure decision function - no I/O, easy to reason about/test in isolation.
  *
  * Rules (per the chosen design):
+ *  - If currentReplicas is below minReplicas (the configured floor, possibly
+ *    raised by a manual override), scale straight up to minReplicas.
  *  - Scale UP by 1 if CPU% OR Memory% is above its "high" threshold, unless
  *    already at maxReplicas.
  *  - Scale DOWN by 1 only if BOTH CPU% AND Memory% are below their "low"
@@ -12,6 +14,13 @@
  */
 export function decide({ cpuPct, memPct, currentReplicas, target }) {
   const { minReplicas, maxReplicas, cpuHigh, cpuLow, memHigh, memLow } = target;
+
+  // Below the floor (e.g. a manual override just raised minReplicas): scale
+  // straight up to it, regardless of load or missing metrics - the floor is
+  // a promise, not a threshold.
+  if (currentReplicas < minReplicas) {
+    return { action: "up", desiredReplicas: minReplicas, reason: `below minReplicas floor (${minReplicas})` };
+  }
 
   const hasCpu = cpuPct != null;
   const hasMem = memPct != null;
